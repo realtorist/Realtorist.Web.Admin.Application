@@ -1,0 +1,1 @@
+Application for Admin project for Realtorist project.
