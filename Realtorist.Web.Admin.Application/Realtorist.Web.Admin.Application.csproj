@@ -13,6 +13,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Realtorist.Models" Version="0.0.2" />
+    <PackageReference Include="Realtorist.Services.Abstractions" Version="0.0.2" />
+    <PackageReference Include="Realtorist.DataAccess.Abstractions" Version="0.0.2" />
+    <PackageReference Include="Realtorist.GeoCoding.Abstractions" Version="0.0.2" />
+    <PackageReference Include="Realtorist.RetsClient.Abstractions" Version="0.0.2" />
+    <PackageReference Include="Realtorist.Web.Models" Version="0.0.3" />
+    <PackageReference Include="Realtorist.Web.Helpers" Version="0.0.2" />
+    <PackageReference Include="Realtorist.Extensions.Base" Version="0.0.1" />
+    
     <PackageReference Include="ExtCore.Mvc.Infrastructure" Version="6.0.0" />
   </ItemGroup>
 
