@@ -10,6 +10,9 @@ using Realtorist.Models.Settings;
 using Realtorist.Services.Abstractions.Providers;
 using Realtorist.Web.Models.Attributes;
 using Realtorist.Web.Helpers;
+using System.Linq;
+using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
 
 namespace Realtorist.Web.Admin.Application.Controllers
 {
@@ -23,10 +26,14 @@ namespace Realtorist.Web.Admin.Application.Controllers
     {
         private readonly ISettingsDataAccess _settingsDataAccess;
         private readonly ICachedSettingsProvider _cachedSettingsProvider;
+        private readonly IEncryptionProvider _encryptionProvider;
+        private readonly ILogger _logger;
 
-        public SettingsApiController(ISettingsDataAccess settingsDataAccess,ICachedSettingsProvider cachedSettingsProvider = null)
+        public SettingsApiController(ISettingsDataAccess settingsDataAccess, IEncryptionProvider encryptionProvider, ILogger<SettingsApiController> logger, ICachedSettingsProvider cachedSettingsProvider = null)
         {
             _settingsDataAccess = settingsDataAccess ?? throw new ArgumentNullException(nameof(settingsDataAccess));
+            _encryptionProvider = encryptionProvider ?? throw new ArgumentNullException(nameof(encryptionProvider));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _cachedSettingsProvider = cachedSettingsProvider;
         }
 
@@ -40,8 +47,22 @@ namespace Realtorist.Web.Admin.Application.Controllers
         public async Task<JsonResult> GetSetting([FromRoute] string type)
         {
             var setting = await _settingsDataAccess.GetSettingAsync(type);
+            if (setting is null) return Json(null);
 
-            return Json(setting, new JsonSerializerSettings
+            JToken json = JsonConvert.DeserializeObject<JToken>(JsonConvert.SerializeObject(setting));
+            WalkNode(json, node =>
+            {
+                foreach(var property in node.Properties())
+                {
+                    _logger.LogInformation($"Found property: {property.Name} = {property.Value}       Type: {property.Type}");
+                }
+                foreach (var property in GetPasswordProperties(node))
+                {
+                    property.Value = _encryptionProvider.EncryptTwoWay(((string)property.Value));
+                }
+            });
+
+            return Json(json, new JsonSerializerSettings
             {
                 ContractResolver = new CamelCasePropertyNamesContractResolver()
             });
@@ -58,6 +79,19 @@ namespace Realtorist.Web.Admin.Application.Controllers
         public async Task<IActionResult> UpdateSetting([FromRoute] string type, [FromBody] JToken value)
         {
             if (value is null) return BadRequest();
+
+            WalkNode(value, node => {
+                foreach (var property in GetPasswordProperties(node))
+                {
+                    if (property.Value == null) continue;
+                    try {
+                        property.Value = _encryptionProvider.Decrypt((string)property.Value);
+                    }
+                    catch {
+                        property.Value = _encryptionProvider.EncryptTwoWay(((string)property.Value));
+                    }
+                }
+            });
 
             var convertType = typeof(ExpandoObject);
             if (value.Type == JTokenType.Array)
@@ -82,5 +116,31 @@ namespace Realtorist.Web.Admin.Application.Controllers
 
             return NoContent();
         }
+
+        private static void WalkNode(JToken node, Action<JObject> action)
+        {
+            if (node.Type == JTokenType.Object)
+            {
+                action((JObject)node);
+
+                foreach (JProperty child in node.Children<JProperty>())
+                {
+                    WalkNode(child.Value, action);
+                }
+            }
+            else if (node.Type == JTokenType.Array)
+            {
+                foreach (JToken child in node.Children())
+                {
+                    WalkNode(child, action);
+                }
+            }
+        }
+
+        private static IEnumerable<JProperty> GetPasswordProperties(JObject node) 
+            => node.Properties().Where(p => p.Type == JTokenType.Property 
+                && p.Name.ToLower().Contains("password")
+                && p.Value != null
+                && p.Value.Type == JTokenType.String);
     }
 }

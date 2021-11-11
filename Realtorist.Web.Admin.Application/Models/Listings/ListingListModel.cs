@@ -2,7 +2,6 @@
 using System.ComponentModel.DataAnnotations;
 using Realtorist.Models.Enums.LookupTypes;
 using Realtorist.Models.Listings.Details;
-using Realtorist.Models.Listings.Enums;
 
 namespace Realtorist.Web.Admin.Application.Models.Listings
 {
@@ -27,9 +26,14 @@ namespace Realtorist.Web.Admin.Application.Models.Listings
         public bool Disabled { get; set; }
 
         /// <summary>
-        /// Indicates whether listing was created by user or is from MLS
+        /// Id of the feed
         /// </summary>
-        public ListingSource Source { get; set; }
+        public Guid? FeedId { get; set; }
+
+        /// <summary>
+        /// Type of the feed
+        /// </summary>
+        public string FeedType { get; set; }
 
         /// <summary>
         /// The MLS Number of the property.

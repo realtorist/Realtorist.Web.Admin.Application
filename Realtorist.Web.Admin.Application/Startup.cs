@@ -15,7 +15,7 @@ namespace Realtorist.Web.Admin.Application
 {
     public class Startup : IConfigureServicesExtension, IConfigureApplicationExtension, IConfigureAutoMapperProfileExtension
     {
-        public int Priority => 3;
+        public int Priority => (int)ExtensionPriority.MainApplication + 1;
 
         public void ConfigureServices(IServiceCollection services, IServiceProvider serviceProvider)
         {

@@ -11,7 +11,6 @@ using Realtorist.GeoCoding.Abstractions;
 using Realtorist.Models.Events;
 using Realtorist.Models.Helpers;
 using Realtorist.Models.Listings;
-using Realtorist.Models.Listings.Enums;
 using Realtorist.Models.Pagination;
 using Realtorist.Models.Settings;
 using Realtorist.RetsClient.Abstractions;
@@ -20,6 +19,9 @@ using Realtorist.Web.Models.Attributes;
 using Realtorist.Web.Models.Abstractions.Jobs.Background;
 using Realtorist.Web.Helpers;
 using Realtorist.Web.Admin.Application.Models.Listings;
+using Realtorist.Extensions.Base.Manager;
+using System.Linq;
+using Realtorist.Services.Abstractions.Providers;
 
 namespace Realtorist.Web.Admin.Application.Controllers
 {
@@ -32,25 +34,31 @@ namespace Realtorist.Web.Admin.Application.Controllers
     public class ListingsApiController : Controller
     {
         private readonly IListingsDataAccess _listingsDataAccess;
-        private readonly IUpdateFlowFactory _updateFlowFactory;
+        private readonly ISettingsDataAccess _settingsDataAccess;
         private readonly IBackgroundTaskQueue _backgroundTaskQueue;
+        private readonly IEncryptionProvider _encryptionProvider;
+        private readonly IExtensionManager _extensionManager;
         private readonly IGeoCoder _geoCoder;
         private readonly IMapper _mapper;
         private readonly ILogger _logger;
 
         public ListingsApiController(
             IListingsDataAccess listingsDataAccess,
+            ISettingsDataAccess settingsDataAccess,
             IGeoCoder geoCoder,
             IMapper mapper,
-            IUpdateFlowFactory updateFlowFactory,
             IBackgroundTaskQueue backgroundTaskQueue,
+            IEncryptionProvider encryptionProvider,
+            IExtensionManager extensionManager,
             ILogger<ListingsApiController> logger)
         {
             _listingsDataAccess = listingsDataAccess ?? throw new ArgumentNullException(nameof(listingsDataAccess));
+            _settingsDataAccess = settingsDataAccess ?? throw new ArgumentNullException(nameof(settingsDataAccess));
             _mapper = mapper ?? throw new ArgumentNullException(nameof(mapper));
             _geoCoder = geoCoder ?? throw new ArgumentNullException(nameof(geoCoder));
-            _updateFlowFactory = updateFlowFactory ?? throw new ArgumentNullException(nameof(updateFlowFactory));
             _backgroundTaskQueue = backgroundTaskQueue ?? throw new ArgumentNullException(nameof(backgroundTaskQueue));
+            _extensionManager = extensionManager ?? throw new ArgumentNullException(nameof(extensionManager));
+            _encryptionProvider = encryptionProvider ?? throw new ArgumentNullException(nameof(encryptionProvider));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
@@ -70,7 +78,16 @@ namespace Realtorist.Web.Admin.Application.Controllers
                 request.SortOrder = Realtorist.Models.Enums.SortByOrder.Desc;
             }
 
-            return await _listingsDataAccess.GetListingsAsync<ListingListModel>(request, filter);
+            var feeds = (await _settingsDataAccess.GetSettingAsync<ListingsSettings>(SettingTypes.Listings))?.Feeds ?? new ListingsFeed[0];
+
+            var listings = await _listingsDataAccess.GetListingsAsync<ListingListModel>(request, filter);
+            foreach (var listing in listings.Results)
+            {
+                if (listing.FeedId is null) continue;
+                listing.FeedType = feeds.FirstOrDefault(f => f.Id == listing.FeedId)?.FeedType ?? "Unknown";
+            }
+
+            return listings;
         }
 
         /// <summary>
@@ -102,12 +119,13 @@ namespace Realtorist.Web.Admin.Application.Controllers
             }
             
             var oldListing = await _listingsDataAccess.GetListingAsync(listingId);
-            if (oldListing.Source != ListingSource.User)
+            if (oldListing.FeedId is not null)
             {
                 return BadRequest($"Listing {listingId} can't be updated as it's comming from the MLS.");
             }
 
-            listing.Source = ListingSource.User;
+            listing.FeedId = null;
+            listing.FeedType = null;
             listing.LastUpdated = DateTime.Now;
 
             var coordinates = await _geoCoder.GetCoordinatesAsync(listing.Address);
@@ -137,7 +155,8 @@ namespace Realtorist.Web.Admin.Application.Controllers
             }
 
             listing.Id = Guid.NewGuid();
-            listing.Source = ListingSource.User;
+            listing.FeedId = null;
+            listing.FeedType = null;
             listing.LastUpdated = DateTime.Now;
 
             var coordinates = await _geoCoder.GetCoordinatesAsync(listing.Address);
@@ -162,7 +181,7 @@ namespace Realtorist.Web.Admin.Application.Controllers
         public async Task<IActionResult> DeleteListingAsync([FromRoute] Guid listingId)
         {
             var listing = await _listingsDataAccess.GetListingAsync(listingId);
-            if (listing.Source != ListingSource.User)
+            if (listing.FeedId is not null)
             {
                 return BadRequest($"Listing {listingId} can't be removed as it's comming from the MLS.");
             }
@@ -230,14 +249,25 @@ namespace Realtorist.Web.Admin.Application.Controllers
         /// <returns>Ok</returns>
         [HttpPost]
         [Route("update")]
-        public async Task<IActionResult> LaunchUpdateAsync([FromBody] RetsConfiguration configuration)
+        public async Task<IActionResult> LaunchUpdateAsync([FromBody] ListingsFeed configuration)
         {
             if (!ModelState.IsValid)
             {
                 return BadRequest(ModelState.GetModelStateValidationErrors());
             }
 
-            var type = _updateFlowFactory.GetUpdateFlowType(configuration.ListingSource);
+            var type = _extensionManager.GetInstances<IListingsFeedExtension>().FirstOrDefault(ext => ext.Name == configuration.FeedType)?.UpdateFlowType;
+            if (type is null)
+            {
+                return BadRequest($"Unknown feed type: {configuration.FeedType}");
+            }
+
+            try {
+                configuration.Password = _encryptionProvider.Decrypt(configuration.Password);
+            } catch {
+                configuration.Password = _encryptionProvider.EncryptTwoWay(configuration.Password);
+            }
+
             _backgroundTaskQueue.EnqueueTask(async (serviceScopeFactory, cancellationToken) =>
             {
                 // Get services
@@ -253,15 +283,22 @@ namespace Realtorist.Web.Admin.Application.Controllers
                 }
                 catch (Exception ex)
                 {
-                    var logMessage = $"Failed to update listings from {configuration.ListingSource}";
+                    var logMessage = $"Failed to update listings from {configuration.FeedType}";
                     logger.LogError(ex, logMessage);
                     await eventLogger.CreateEventAsync(EventTypes.Generic, logMessage, logMessage, ex);
                 }
             });
 
-            _logger.LogInformation($"Successfully put a task for listing update from source '{configuration.ListingSource}' into the queue.");
+            _logger.LogInformation($"Successfully put a task for listing update from source '{configuration.FeedType}' into the queue.");
 
             return Ok();
+        }
+
+        [HttpGet]
+        [Route("feed/types")]
+        public string[] GetFeedTypes()
+        {
+            return _extensionManager.GetInstances<IListingsFeedExtension>().Select(feed => feed.Name).ToArray();
         }
     }
 }
